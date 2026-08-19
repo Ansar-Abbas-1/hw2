@@ -10,6 +10,7 @@
 #include <chrono>
 #include <cstdlib>
 #include <memory>
+#include <algorithm>
 
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
@@ -37,6 +38,23 @@ class Iiwa_pub_sub : public rclcpp::Node
             declare_parameter("cmd_interface", "position"); // default to "position"
             get_parameter("cmd_interface", cmd_interface_);
             RCLCPP_INFO(get_logger(),"Current cmd interface is: '%s'", cmd_interface_.c_str());
+
+            declare_parameter("ctrl", "velocity_ctrl");
+            get_parameter("ctrl", ctrl_);
+
+            RCLCPP_INFO(get_logger(), "Current velocity controller is: '%s'", ctrl_.c_str());
+
+            if (!(ctrl_ == "velocity_ctrl" ||
+                ctrl_ == "velocity_ctrl_null"))
+            {
+                RCLCPP_ERROR(
+                    get_logger(),
+                    "Invalid ctrl. Use 'velocity_ctrl' or "
+                    "'velocity_ctrl_null'.");
+
+                return;
+            }
+
 
             if (!(cmd_interface_ == "position" || cmd_interface_ == "velocity" || cmd_interface_ == "effort" ))
             {
@@ -71,6 +89,7 @@ class Iiwa_pub_sub : public rclcpp::Node
             declare_parameter("total_time", 1.5);
             declare_parameter("trajectory_len", 150);
             declare_parameter("Kp", 5.0);
+            declare_parameter("lambda", 0.1);
 
             declare_parameter("end_position_x", 0.5);
             declare_parameter("end_position_y", 0.0);
@@ -81,6 +100,7 @@ class Iiwa_pub_sub : public rclcpp::Node
             get_parameter("total_time", total_time_);
             get_parameter("trajectory_len", trajectory_len_);
             get_parameter("Kp", Kp_);
+            get_parameter("lambda", lambda_);
 
             get_parameter("end_position_x", end_position_x_);
             get_parameter("end_position_y", end_position_y_);
@@ -93,6 +113,7 @@ class Iiwa_pub_sub : public rclcpp::Node
             RCLCPP_INFO(get_logger(), "total_time: %.2f", total_time_);
             RCLCPP_INFO(get_logger(), "trajectory_len: %d", trajectory_len_);
             RCLCPP_INFO(get_logger(), "Kp: %.2f", Kp_);
+            RCLCPP_INFO(get_logger(), "lambda: %.4f", lambda_);
 
             RCLCPP_INFO(get_logger(),
                         "end_position: [%.2f, %.2f, %.2f]",
@@ -162,7 +183,8 @@ class Iiwa_pub_sub : public rclcpp::Node
             // std::cout << q.data <<std::endl;
 
             // Initialize controller
-            KDLController controller_(*robot_);
+            // KDLController controller_(*robot_);
+            controller_ = std::make_shared<KDLController>(*robot_);
 
             // EE's trajectory initial position (just an offset)
             Eigen::Vector3d init_position(Eigen::Vector3d(init_cart_pose_.p.data) - Eigen::Vector3d(0,0,0.1));
@@ -292,6 +314,40 @@ class Iiwa_pub_sub : public rclcpp::Node
                     }
                 }
 
+
+                // Update KDL robot with the latest measured joint state
+                robot_->update(
+                    toStdVector(joint_positions_.data),
+                    toStdVector(joint_velocities_.data));
+
+
+                // =====================================================
+                // DEBUG: joint-limit distances
+                // =====================================================
+                // Eigen::VectorXd q_debug = robot_->getJntValues();
+                // Eigen::MatrixXd limits_debug = robot_->getJntLimits();
+
+                // std::cout << "CURRENT JOINT LIMIT DISTANCES" << std::endl;
+
+                // for (int i = 0; i < q_debug.size(); ++i)
+                // {
+                //     double q_lower = limits_debug(i, 0);
+                //     double q_upper = limits_debug(i, 1);
+
+                //     double dist_lower = q_debug(i) - q_lower;
+                //     double dist_upper = q_upper - q_debug(i);
+                //     double nearest_dist = std::min(dist_lower, dist_upper);
+
+                //     std::cout << "Joint " << i + 1
+                //             << " q=" << q_debug(i)
+                //             << " lower_dist=" << dist_lower
+                //             << " upper_dist=" << dist_upper
+                //             << " nearest_dist=" << nearest_dist
+                //             << std::endl;
+                // }
+    
+                
+                    
                 // Compute EE frame
                 KDL::Frame cartpos = robot_->getEEFrame();           
 
@@ -311,17 +367,43 @@ class Iiwa_pub_sub : public rclcpp::Node
                     joint_positions_cmd_ = joint_positions_;
                     robot_->getInverseKinematics(nextFrame, joint_positions_cmd_);
                 }
-                else if(cmd_interface_ == "velocity"){
-                    // Compute differential IK
-                    Vector6d cartvel; cartvel << p_.vel + Kp_*error, o_error;
-                    joint_velocities_cmd_.data = pseudoinverse(robot_->getEEJacobian().data)*cartvel;
+                // else if(cmd_interface_ == "velocity"){
+                //     // Compute differential IK
+                //     Vector6d cartvel; cartvel << p_.vel + Kp_*error, o_error;
+                //     joint_velocities_cmd_.data = pseudoinverse(robot_->getEEJacobian().data)*cartvel;
+                // }
+
+
+                else if(cmd_interface_ == "velocity")
+                {
+                    if(ctrl_ == "velocity_ctrl")
+                    {
+                        // Standard differential IK
+                        Vector6d cartvel;
+                        cartvel << p_.vel + Kp_*error, o_error;
+
+                        joint_velocities_cmd_.data =
+                            pseudoinverse(
+                                robot_->getEEJacobian().data) * cartvel;
+                    }
+                    else if(ctrl_ == "velocity_ctrl_null")
+                    {
+                        // Differential IK with joint-limit avoidance
+                        joint_velocities_cmd_.data =
+                            controller_->velocity_ctrl_null(
+                                error,
+                                Kp_,
+                                lambda_);
+                    }
                 }
+
+
                 else if(cmd_interface_ == "effort"){
                     joint_efforts_cmd_.data[0] = 0.1*std::sin(2*M_PI*t_/total_time_);
                 }
 
-                // Update KDLrobot structure
-                robot_->update(toStdVector(joint_positions_.data),toStdVector(joint_velocities_.data));
+                // // Update KDLrobot structure
+                // robot_->update(toStdVector(joint_positions_.data),toStdVector(joint_velocities_.data));
 
                 if(cmd_interface_ == "position"){
                     // Set joint position commands
@@ -421,6 +503,7 @@ class Iiwa_pub_sub : public rclcpp::Node
         KDL::JntArray joint_efforts_cmd_;
 
         std::shared_ptr<KDLRobot> robot_;
+        std::shared_ptr<KDLController> controller_;
         KDLPlanner planner_;
 
         trajectory_point p_;
@@ -431,6 +514,7 @@ class Iiwa_pub_sub : public rclcpp::Node
         std::string cmd_interface_;
         std::string traj_type_;
         std::string s_type_;
+        std::string ctrl_;
 
         // ROS2 parameters
         double traj_duration_;
@@ -438,10 +522,12 @@ class Iiwa_pub_sub : public rclcpp::Node
         double total_time_;
         int trajectory_len_;
         double Kp_;
+        double lambda_;
 
         double end_position_x_;
         double end_position_y_;
         double end_position_z_;
+        
 
         KDL::Frame init_cart_pose_;
 };

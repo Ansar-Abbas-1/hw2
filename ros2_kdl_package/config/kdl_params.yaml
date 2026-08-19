@@ -1,6 +1,7 @@
 ros2_kdl_node:
   ros__parameters:
 
+    cmd_interface: velocity
     traj_duration: 1.5
     acc_duration: 0.5
 
@@ -8,6 +9,7 @@ ros2_kdl_node:
     trajectory_len: 150
 
     Kp: 5.0
+    lambda: 9.9
 
     end_position_x: 0.5
     end_position_y: 0.0
