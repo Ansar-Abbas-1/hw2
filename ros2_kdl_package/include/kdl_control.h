@@ -26,6 +26,11 @@ public:
                            double _Kdp,
                            double _Kdo);
 
+    Eigen::VectorXd velocity_ctrl_null(
+        const Eigen::Vector3d &_ep,
+        double _Kp,
+        double _lambda);
+
 private:
 
     KDLRobot* robot_;
