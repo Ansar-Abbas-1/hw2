@@ -17,6 +17,8 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/wait_for_message.hpp"
+#include "rclcpp_action/rclcpp_action.hpp"
+#include "ros2_kdl_package/action/execute_trajectory.hpp"
 
 #include "kdl_robot.h"
 #include "kdl_control.h"
@@ -26,6 +28,12 @@
 using namespace KDL;
 using FloatArray = std_msgs::msg::Float64MultiArray;
 using namespace std::chrono_literals;
+using ExecuteTrajectory =
+    ros2_kdl_package::action::ExecuteTrajectory;
+
+using GoalHandleExecuteTrajectory =
+    rclcpp_action::ServerGoalHandle<ExecuteTrajectory>;
+
 
 class Iiwa_pub_sub : public rclcpp::Node
 {
@@ -124,6 +132,7 @@ class Iiwa_pub_sub : public rclcpp::Node
 
             iteration_ = 0; t_ = 0;
             joint_state_available_ = false; 
+            trajectory_active_ = false;
 
             // retrieve robot_description param
             auto parameters_client = std::make_shared<rclcpp::SyncParametersClient>(node_handle_, "robot_state_publisher");
@@ -268,12 +277,144 @@ class Iiwa_pub_sub : public rclcpp::Node
             cmd_msg.data = desired_commands_;
             cmdPublisher_->publish(cmd_msg);
 
-            RCLCPP_INFO(this->get_logger(), "Starting trajectory execution ...");
+            // RCLCPP_INFO(this->get_logger(), "Starting trajectory execution ...");
+            // Create action server
+            using namespace std::placeholders;
+
+            action_server_ =
+                rclcpp_action::create_server<ExecuteTrajectory>(
+                    this,
+                    "execute_trajectory",
+                    std::bind(
+                        &Iiwa_pub_sub::handle_goal,
+                        this,
+                        _1,
+                        _2),
+                    std::bind(
+                        &Iiwa_pub_sub::handle_cancel,
+                        this,
+                        _1),
+                    std::bind(
+                        &Iiwa_pub_sub::handle_accepted,
+                        this,
+                        _1));
+
+            RCLCPP_INFO(
+                this->get_logger(),
+                "Trajectory action server ready. Waiting for a goal...");
+
+
         }
 
     private:
 
+        rclcpp_action::GoalResponse handle_goal(
+            const rclcpp_action::GoalUUID & uuid,
+            std::shared_ptr<const ExecuteTrajectory::Goal> goal)
+        {
+            (void)uuid;
+
+            RCLCPP_INFO(
+                this->get_logger(),
+                "Received trajectory execution goal");
+
+            // Only accept a goal that explicitly requests execution
+            if (!goal->start)
+            {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "Goal rejected because start=false");
+
+                return rclcpp_action::GoalResponse::REJECT;
+            }
+
+            // Do not start another trajectory while one is already running
+            if (trajectory_active_)
+            {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "Goal rejected because a trajectory is already running");
+
+                return rclcpp_action::GoalResponse::REJECT;
+            }
+
+            return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
+        }
+
+
+        rclcpp_action::CancelResponse handle_cancel(
+            const std::shared_ptr<GoalHandleExecuteTrajectory> goal_handle)
+        {
+            (void)goal_handle;
+
+            RCLCPP_INFO(
+                this->get_logger(),
+                "Received request to cancel trajectory");
+
+            return rclcpp_action::CancelResponse::ACCEPT;
+        }
+
+
+        void handle_accepted(
+            const std::shared_ptr<GoalHandleExecuteTrajectory> goal_handle)
+        {
+            RCLCPP_INFO(
+                this->get_logger(),
+                "Trajectory goal accepted. Starting execution...");
+
+            active_goal_handle_ = goal_handle;
+
+            // Restart trajectory from its beginning
+            iteration_ = 0;
+            t_ = 0.0;
+
+            trajectory_active_ = true;
+        }
+
+
+
         void cmd_publisher(){
+
+            // Do nothing until an action client starts the trajectory
+            if (!trajectory_active_)
+            {
+                return;
+            }
+
+            // Check whether the action client requested cancellation
+            if (active_goal_handle_ &&
+                active_goal_handle_->is_canceling())
+            {
+                // Stop velocity commands
+                if (cmd_interface_ == "velocity")
+                {
+                    for (long int i = 0;
+                        i < joint_velocities_.data.size();
+                        ++i)
+                    {
+                        desired_commands_[i] = 0.0;
+                    }
+                }
+
+                std_msgs::msg::Float64MultiArray cmd_msg;
+                cmd_msg.data = desired_commands_;
+                cmdPublisher_->publish(cmd_msg);
+
+                auto result =
+                    std::make_shared<ExecuteTrajectory::Result>();
+
+                result->success = false;
+
+                active_goal_handle_->canceled(result);
+
+                trajectory_active_ = false;
+
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "Trajectory canceled");
+
+                return;
+            }
 
             iteration_ = iteration_ + 1;
 
@@ -358,6 +499,17 @@ class Iiwa_pub_sub : public rclcpp::Node
                 Eigen::Vector3d error = computeLinearError(p_.pos, Eigen::Vector3d(cartpos.p.data));
                 Eigen::Vector3d o_error = computeOrientationError(toEigen(init_cart_pose_.M), toEigen(cartpos.M));
                 std::cout << "The error norm is : " << error.norm() << std::endl;
+
+                // Publish Cartesian position error as action feedback
+                if (active_goal_handle_)
+                {
+                    auto feedback =
+                        std::make_shared<ExecuteTrajectory::Feedback>();
+
+                    feedback->position_error = error.norm();
+
+                    active_goal_handle_->publish_feedback(feedback);
+                }
 
                 if(cmd_interface_ == "position"){
                     // Next Frame
@@ -464,6 +616,25 @@ class Iiwa_pub_sub : public rclcpp::Node
                 std_msgs::msg::Float64MultiArray cmd_msg;
                 cmd_msg.data = desired_commands_;
                 cmdPublisher_->publish(cmd_msg);
+                // Complete the action
+                if (active_goal_handle_)
+                {
+                    auto result =
+                        std::make_shared<ExecuteTrajectory::Result>();
+
+                    result->success = true;
+
+                    active_goal_handle_->succeed(result);
+
+                    RCLCPP_INFO(
+                        this->get_logger(),
+                        "Action completed successfully");
+                }
+
+                trajectory_active_ = false;
+                active_goal_handle_.reset();
+                
+
             }
         }
 
@@ -493,6 +664,14 @@ class Iiwa_pub_sub : public rclcpp::Node
         rclcpp::TimerBase::SharedPtr timer_; 
         rclcpp::TimerBase::SharedPtr subTimer_;
         rclcpp::Node::SharedPtr node_handle_;
+
+        // Action server
+        rclcpp_action::Server<ExecuteTrajectory>::SharedPtr action_server_;
+
+        std::shared_ptr<GoalHandleExecuteTrajectory>
+            active_goal_handle_;
+
+        bool trajectory_active_;
 
         std::vector<double> desired_commands_ = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
         KDL::JntArray joint_positions_;
