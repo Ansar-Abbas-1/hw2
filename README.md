@@ -252,3 +252,63 @@ With `velocity_ctrl_null`, all joints remained inside their configured limits. J
 
 The commanded velocity and joint-position plots for both controllers are reported in the report.
 
+## Q1(c)
+
+### :dart: Action-based trajectory execution
+
+The `ros2_kdl_node` can be used as a ROS 2 action server to execute the Cartesian trajectory upon request from an action client. The action server is available through
+
+```
+/execute_trajectory
+```
+
+and uses the custom action interface
+
+```
+ros2_kdl_package/action/ExecuteTrajectory
+```
+
+The action goal is used to trigger the trajectory execution, while the Cartesian position error norm is continuously published as feedback. At the end of the trajectory, the server returns the execution result.
+
+The action interface is defined as
+```
+bool start
+---
+bool success
+---
+float64 position_error
+```
+
+First, launch the robot with the desired command interface. For instance, using the velocity interface
+```
+ros2 launch iiwa_bringup iiwa.launch.py command_interface:="velocity" robot_controller:="velocity_controller"
+```
+
+Then, in a second terminal, launch the KDL node acting as the action server
+```
+ros2 launch ros2_kdl_package kdl_launch.launch.py cmd_interface:=velocity ctrl:=velocity_ctrl_null
+```
+
+The node waits for an action goal before starting the trajectory.
+
+In a third terminal, run the action client
+```
+ros2 run ros2_kdl_package trajectory_action_client
+```
+
+The client sends the trajectory execution goal to the server and displays the position error received as action feedback during the motion. A successful execution produces output similar to
+```
+Waiting for trajectory action server...
+Sending trajectory execution goal
+Trajectory goal accepted by server
+Position error: ...
+Position error: ...
+Trajectory executed successfully
+```
+
+The available action server can also be checked with
+```
+ros2 action list
+ros2 action info /execute_trajectory
+```
+
