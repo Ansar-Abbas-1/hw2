@@ -312,3 +312,280 @@ ros2 action list
 ros2 action info /execute_trajectory
 ```
 
+## ✅ Q2(a) - ArUco Marker Detection in Gazebo
+
+### 📦 About
+
+For **Question 2(a)**, a custom Gazebo world was created containing:
+
+- the KUKA iiwa robot,
+- a static ArUco marker with ID `201`,
+- and a standalone simulated camera.
+
+The camera image and camera calibration information are bridged from Gazebo to ROS 2 using `ros_gz_bridge`. The marker is then detected using the `aruco_ros` package.
+
+The detected marker pose is published relative to the simulated camera frame.
+
+---
+
+### 📦 Required Packages
+
+Make sure `aruco_ros` is installed:
+
+```bash
+sudo apt install ros-humble-aruco-ros
+```
+
+The image viewer used for visual verification can be installed with:
+
+```bash
+sudo apt install ros-humble-rqt-image-view
+```
+
+---
+
+### 🔨 Build
+
+From the ROS 2 workspace:
+
+```bash
+cd ~/ros2_ws
+```
+
+Check for missing dependencies:
+
+```bash
+rosdep install -i --from-path src --rosdistro humble -y
+```
+
+Build the required packages:
+
+```bash
+colcon build --packages-select iiwa_description iiwa_bringup
+```
+
+Source the setup files:
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+```
+
+---
+
+### ▶️ Launch the Gazebo Simulation
+
+Open the first terminal:
+
+```bash
+cd ~/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+```
+
+Launch the iiwa robot in simulation:
+
+```bash
+ros2 launch iiwa_bringup iiwa.launch.py use_sim:=true
+```
+
+The custom Gazebo world contains:
+
+```text
+iiwa
+arucotag
+simulated_camera
+ground_plane
+sun
+```
+
+The ArUco marker is inserted as a static Gazebo model and positioned in front of the simulated camera.
+
+---
+
+### 📷 Launch the ArUco Detection Pipeline
+
+Open a second terminal:
+
+```bash
+cd ~/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+```
+
+Run:
+
+```bash
+ros2 launch iiwa_description aruco_detection.launch.py
+```
+
+The `aruco_detection.launch.py` launch file automatically starts the required Gazebo-to-ROS 2 bridges and the `aruco_ros` detector.
+
+The image pipeline is:
+
+```text
+Gazebo /simulated_camera
+        ↓
+   ros_gz_bridge
+        ↓
+ROS 2 /simulated_camera
+        ↓
+     aruco_ros
+```
+
+The camera information pipeline is:
+
+```text
+Gazebo /camera_info
+        ↓
+   ros_gz_bridge
+        ↓
+ROS 2 /camera_info
+        ↓
+     aruco_ros
+```
+
+The detector is configured with:
+
+```text
+marker_id: 201
+marker_size: 0.1 m
+camera_frame: simulated_camera/camera_link/camera
+marker_frame: aruco_marker_frame
+```
+
+The ROS 2 input topics used by `aruco_ros` are:
+
+```text
+/simulated_camera
+/camera_info
+```
+
+---
+
+### 👁️ Verify the Camera and ArUco Detection
+
+Open another terminal:
+
+```bash
+cd ~/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+```
+
+Launch the ROS 2 image viewer:
+
+```bash
+ros2 run rqt_image_view rqt_image_view
+```
+
+To view the raw image produced by the simulated Gazebo camera, select:
+
+```text
+/simulated_camera
+```
+
+To view the processed ArUco detection result, select:
+
+```text
+/aruco_single/result
+```
+
+The processed image shows the detected marker boundary, coordinate axes, and the detected marker ID `201`.
+
+---
+
+### ✅ Verify the Marker Pose
+
+The available ArUco output topics can be checked using:
+
+```bash
+ros2 topic list | grep -i aruco
+```
+
+The estimated marker pose is published on:
+
+```text
+/aruco_single/pose
+```
+
+To verify that marker ID `201` is actually being detected, run:
+
+```bash
+ros2 topic echo /aruco_single/pose --once
+```
+
+A successful detection produces output similar to:
+
+```text
+header:
+  frame_id: simulated_camera/camera_link/camera
+
+pose:
+  position:
+    x: -0.0003
+    y: -0.0003
+    z: 0.3512
+  orientation:
+    x: 0.7071
+    y: 0.7071
+    z: 0.00004
+    w: -0.00007
+```
+
+The detected marker is approximately `0.35 m` in front of the simulated camera, which is consistent with the camera and marker placement in the Gazebo world.
+
+---
+
+### 📁 Files Added or Modified for Q2(a)
+
+The following files were created or modified for **Question 2(a)**:
+
+```text
+ros2_iiwa/iiwa_description/gazebo/models/simulated_camera/model.config
+
+ros2_iiwa/iiwa_description/gazebo/models/simulated_camera/model.sdf
+
+ros2_iiwa/iiwa_description/gazebo/worlds/aruco_world.world
+
+ros2_iiwa/iiwa_description/launch/aruco_detection.launch.py
+
+ros2_iiwa/iiwa_description/CMakeLists.txt
+
+ros2_iiwa/iiwa_description/env-hooks/iiwa_description.sh.in
+
+ros2_iiwa/iiwa_bringup/launch/iiwa.launch.py
+```
+
+The Gazebo resource paths were updated so that Gazebo can locate the custom models.
+
+The `CMakeLists.txt` file was also updated so that the new `launch` directory is installed with the `iiwa_description` package.
+
+---
+
+### 📈 Result
+
+The custom Gazebo world successfully launches with the KUKA iiwa robot, the ArUco marker, and the simulated camera.
+
+The simulated camera successfully publishes the image and camera information at approximately `30 Hz`.
+
+The `aruco_ros` detector successfully detects marker ID `201`.
+
+The processed detection image is available on:
+
+```text
+/aruco_single/result
+```
+
+and shows the marker boundary, marker ID, and estimated coordinate axes.
+
+The estimated marker pose is published on:
+
+```text
+/aruco_single/pose
+```
+
+The successful publication of the marker pose confirms that the ArUco marker is visible to the simulated camera and correctly detected by `aruco_ros`.
+
+This completes **Question 2(a)**.
+
