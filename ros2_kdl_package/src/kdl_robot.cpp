@@ -102,6 +102,10 @@ void KDLRobot::createChain(KDL::Tree &robot_tree)
     std::cout << "KDL robot model created" << std::endl;
     std::cout << "with " << chain_.getNrOfJoints() << " joints" << std::endl;
     std::cout << "and " << chain_.getNrOfSegments() << " segments" << std::endl;
+
+    std::cout << "KDL chain tip: " << chain_.getSegment( chain_.getNrOfSegments() - 1).getName() << std::endl;
+
+
 }
 
 unsigned int KDLRobot::getNrJnts()

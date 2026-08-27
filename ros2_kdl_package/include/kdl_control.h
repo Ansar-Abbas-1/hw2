@@ -30,6 +30,15 @@ public:
         const Eigen::Vector3d &_ep,
         double _Kp,
         double _lambda);
+        
+    Eigen::VectorXd vision_ctrl(
+        const Eigen::Vector3d &_s,
+        const Eigen::Vector3d &_s_desired,
+        double _marker_distance,
+        const Eigen::Matrix3d &_Rc,
+        const Eigen::MatrixXd &_Jc,
+        double _Kp,
+        double _lambda);    
 
 private:
 

@@ -11,9 +11,12 @@
 #include <cstdlib>
 #include <memory>
 #include <algorithm>
+#include <csignal>
+#include <thread>
 
 #include "std_msgs/msg/float64_multi_array.hpp"
 #include "sensor_msgs/msg/joint_state.hpp"
+#include "geometry_msgs/msg/pose_stamped.hpp"
 
 #include "rclcpp/rclcpp.hpp"
 #include "rclcpp/wait_for_message.hpp"
@@ -35,12 +38,22 @@ using GoalHandleExecuteTrajectory =
     rclcpp_action::ServerGoalHandle<ExecuteTrajectory>;
 
 
+volatile std::sig_atomic_t shutdown_requested = 0;
+
+void signal_handler(int signal)
+{
+    if (signal == SIGINT || signal == SIGTERM)
+    {
+        shutdown_requested = 1;
+    }
+}    
+
 class Iiwa_pub_sub : public rclcpp::Node
 {
     public:
         Iiwa_pub_sub()
-        : Node("ros2_kdl_node"), 
-        node_handle_(std::shared_ptr<Iiwa_pub_sub>(this))
+        : Node("ros2_kdl_node") 
+        // node_handle_(std::shared_ptr<Iiwa_pub_sub>(this))
         {
             // declare cmd_interface parameter (position, velocity)
             declare_parameter("cmd_interface", "position"); // default to "position"
@@ -50,15 +63,19 @@ class Iiwa_pub_sub : public rclcpp::Node
             declare_parameter("ctrl", "velocity_ctrl");
             get_parameter("ctrl", ctrl_);
 
-            RCLCPP_INFO(get_logger(), "Current velocity controller is: '%s'", ctrl_.c_str());
+            
+            RCLCPP_INFO(get_logger(), "Current controller is: '%s'", ctrl_.c_str());
+
+
 
             if (!(ctrl_ == "velocity_ctrl" ||
-                ctrl_ == "velocity_ctrl_null"))
+                ctrl_ == "velocity_ctrl_null" ||
+                ctrl_ == "vision"))
             {
                 RCLCPP_ERROR(
                     get_logger(),
-                    "Invalid ctrl. Use 'velocity_ctrl' or "
-                    "'velocity_ctrl_null'.");
+                    "Invalid ctrl. Use 'velocity_ctrl', "
+                    "'velocity_ctrl_null', or 'vision'.");
 
                 return;
             }
@@ -132,10 +149,12 @@ class Iiwa_pub_sub : public rclcpp::Node
 
             iteration_ = 0; t_ = 0;
             joint_state_available_ = false; 
+            marker_pose_available_ = false;
             trajectory_active_ = false;
 
             // retrieve robot_description param
-            auto parameters_client = std::make_shared<rclcpp::SyncParametersClient>(node_handle_, "robot_state_publisher");
+            // auto parameters_client = std::make_shared<rclcpp::SyncParametersClient>(node_handle_, "robot_state_publisher");
+            auto parameters_client = std::make_shared<rclcpp::SyncParametersClient>(this, "robot_state_publisher");
             while (!parameters_client->wait_for_service(1s)) {
                 if (!rclcpp::ok()) {
                     RCLCPP_ERROR(this->get_logger(), "Interrupted while waiting for the service. Exiting.");
@@ -168,28 +187,139 @@ class Iiwa_pub_sub : public rclcpp::Node
             jointSubscriber_ = this->create_subscription<sensor_msgs::msg::JointState>(
                 "/joint_states", 10, std::bind(&Iiwa_pub_sub::joint_state_subscriber, this, std::placeholders::_1));
 
+            // Subscriber to ArUco marker pose
+            arucoPoseSubscriber_ =this->create_subscription<geometry_msgs::msg::PoseStamped>(
+                    "/aruco_single/pose", 10, std::bind(&Iiwa_pub_sub::aruco_pose_subscriber, this, std::placeholders::_1));    
+
             // Wait for the joint_state topic
             while(!joint_state_available_){
                 RCLCPP_INFO(this->get_logger(), "No data received yet! ...");
-                rclcpp::spin_some(node_handle_);
+                // rclcpp::spin_some(node_handle_);
+                rclcpp::spin_some(this->get_node_base_interface());
             }
 
-            // Update KDLrobot object
+            
+
+            // ---------------------------------------------------------
+            // Update KDL robot with current joint state
+            // ---------------------------------------------------------
             robot_->update(toStdVector(joint_positions_.data),toStdVector(joint_velocities_.data));
-            KDL::Frame f_T_ee = KDL::Frame::Identity();
-            robot_->addEE(f_T_ee);
+
+
+            // ---------------------------------------------------------
+            // Select controlled end-effector
+            // ---------------------------------------------------------
+            //
+            // The KDL chain tip is "tool0".
+            //
+            // URDF geometry:
+            //
+            // link_7 -> tool0       = 0.154 m along local Z
+            // link_7 -> camera_link = 0.180 m along local Z
+            //
+            // Therefore:
+            //
+            // tool0 -> camera origin = 0.026 m along local Z
+            //
+            // Gazebo optical sensor orientation relative to camera_link:
+            //
+            // roll  =  0
+            // pitch = -0.922
+            // yaw   = -0.468
+            //
+            // For vision control we therefore make the KDL end-effector
+            // coincide with the optical camera frame.
+            //
+            if (ctrl_ == "vision")
+            {
+                // ---------------------------------------------------------
+                // Fixed transform from tool0 to the camera mounting frame
+                // ---------------------------------------------------------
+                //
+                // Translation:
+                //   link_7 -> tool0       = 0.154 m
+                //   link_7 -> camera      = 0.180 m
+                //
+                // Therefore:
+                //   tool0 -> camera origin = 0.026 m
+                //
+                // Existing camera mounting rotation:
+                //   roll  =  0
+                //   pitch = -0.922
+                //   yaw   = -0.468
+                // ---------------------------------------------------------
+
+                KDL::Rotation R_mount =
+                    KDL::Rotation::RPY(
+                        0.0,
+                        -0.922,
+                        -0.468);
+
+
+                // ---------------------------------------------------------
+                // Fixed camera-link -> optical-frame rotation
+                //
+                // Optical convention:
+                //   x = right
+                //   y = down
+                //   z = forward
+                //
+                // This is the transformation verified by our
+                // RC candidate test.
+                // ---------------------------------------------------------
+
+                KDL::Rotation R_link_opt(
+                    0.0,  0.0,  1.0,
+                    -1.0,  0.0,  0.0,
+                    0.0, -1.0,  0.0);
+
+
+                // ---------------------------------------------------------
+                // Complete tool0 -> optical-camera transform
+                //
+                // R_tool_opt = R_mount * R_link_opt
+                // ---------------------------------------------------------
+
+                KDL::Frame tool0_T_camera_optical(
+                    R_mount * R_link_opt,
+                    KDL::Vector(
+                        0.0,
+                        0.0,
+                        0.026));
+
+
+                // Tell KDL that the controlled end-effector is now
+                // the optical camera frame.
+                robot_->addEE(tool0_T_camera_optical);
+
+
+                RCLCPP_INFO(
+                    this->get_logger(),
+                    "Vision mode: KDL end-effector set to eye-in-hand optical camera.");
+            }
+            else
+            {
+                KDL::Frame f_T_ee =
+                    KDL::Frame::Identity();
+
+                robot_->addEE(f_T_ee);
+            }
+           
+
+
+            // Recompute pose and Jacobian for the selected end-effector
             robot_->update(toStdVector(joint_positions_.data),toStdVector(joint_velocities_.data));
+
+
 
             // Compute EE frame
             init_cart_pose_ = robot_->getEEFrame();
-            // std::cout << "The initial EE pose is: " << std::endl;  
-            // std::cout << init_cart_pose_ <<std::endl;
+            
 
             // Compute IK
             KDL::JntArray q(nj);
             robot_->getInverseKinematics(init_cart_pose_, q);
-            // std::cout << "The inverse kinematics returned: " <<std::endl; 
-            // std::cout << q.data <<std::endl;
+            
 
             // Initialize controller
             // KDLController controller_(*robot_);
@@ -231,12 +361,7 @@ class Iiwa_pub_sub : public rclcpp::Node
                     p_ = planner_.circular_traj_cubic(t_);
                 }
             }
-            // // Retrieve the first trajectory point
-            // trajectory_point p = planner_.compute_trajectory(t);
-
-            // compute errors
-            // Eigen::Vector3d error = computeLinearError(p_.pos, Eigen::Vector3d(init_cart_pose_.p.data));
-            //std::cout << "The initial error is : " << error << std::endl;
+            
             
             if(cmd_interface_ == "position"){
                 // Create cmd publisher
@@ -303,8 +428,64 @@ class Iiwa_pub_sub : public rclcpp::Node
                 this->get_logger(),
                 "Trajectory action server ready. Waiting for a goal...");
 
+            }
+            // =========================================================
+            // SAFE STOP
+            // =========================================================
+            void stop_robot()
+            {
+                // Only needed for velocity control
+                if (cmd_interface_ != "velocity")
+                {
+                    return;
+                }
 
-        }
+                // ---------------------------------------------------------
+                // Stop the periodic command callback FIRST
+                // ---------------------------------------------------------
+                if (timer_)
+                {
+                    timer_->cancel();
+
+                    RCLCPP_WARN(
+                        this->get_logger(),
+                        "Command timer cancelled.");
+                }
+
+                // Make sure publisher exists
+                if (!cmdPublisher_)
+                {
+                    return;
+                }
+
+                // ---------------------------------------------------------
+                // Reset all internal velocity commands
+                // ---------------------------------------------------------
+                desired_commands_.assign(7, 0.0);
+
+                joint_velocities_cmd_.data.setZero();
+
+                // ---------------------------------------------------------
+                // Create explicit zero command
+                // ---------------------------------------------------------
+                std_msgs::msg::Float64MultiArray stop_msg;
+                stop_msg.data.assign(7, 0.0);
+
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "Stopping robot: sending ZERO joint velocities.");
+
+                // Publish zero several times
+                for (int i = 0; i < 10; ++i)
+                {
+                    cmdPublisher_->publish(stop_msg);
+
+                    std::this_thread::sleep_for(
+                        std::chrono::milliseconds(20));
+                }
+            }
+
+
 
     private:
 
@@ -374,6 +555,159 @@ class Iiwa_pub_sub : public rclcpp::Node
 
 
         void cmd_publisher(){
+
+            //
+            // ---------------------------------------------------------
+            // Shutdown protection
+            //
+            // If Ctrl+C has been pressed, never calculate or publish
+            // another motion command.
+            // ---------------------------------------------------------
+            if (shutdown_requested)
+            {
+                return;
+            }
+
+
+            // =========================================================
+            // Q2(b): continuous vision-control branch
+            // =========================================================
+            //
+            // Vision control does NOT depend on the Q1(c) trajectory
+            // action server and does NOT stop after total_time_.
+            //
+
+            if (ctrl_ == "vision")
+            {
+                // -----------------------------------------------------
+                // No marker has been received yet -> send zero velocity
+                // -----------------------------------------------------
+                if (!marker_pose_available_)
+                {
+                    std::fill(
+                        desired_commands_.begin(),
+                        desired_commands_.end(),
+                        0.0);
+
+                    std_msgs::msg::Float64MultiArray stop_msg;
+                    stop_msg.data = desired_commands_;
+                    cmdPublisher_->publish(stop_msg);
+
+                    RCLCPP_WARN_THROTTLE(
+                        this->get_logger(),
+                        *this->get_clock(),
+                        2000,
+                        "Vision controller waiting for ArUco marker pose. Sending zero velocity.");
+
+                    return;
+                }
+
+                // -----------------------------------------------------
+                // Check whether the latest marker measurement is stale
+                // -----------------------------------------------------
+                // double marker_age =
+                //     (this->now() - last_marker_time_).seconds();
+
+                double marker_age =
+                    std::chrono::duration<double>(
+                        std::chrono::steady_clock::now() -
+                        last_marker_time_).count();
+                    
+
+                if (marker_age > 0.5)
+                {
+                    std::fill(
+                        desired_commands_.begin(),
+                        desired_commands_.end(),
+                        0.0);
+
+                    std_msgs::msg::Float64MultiArray stop_msg;
+                    stop_msg.data = desired_commands_;
+                    cmdPublisher_->publish(stop_msg);
+
+                    RCLCPP_WARN_THROTTLE(
+                        this->get_logger(),
+                        *this->get_clock(),
+                        1000,
+                        "ArUco marker lost/stale (age %.3f s). Sending zero velocity.",
+                        marker_age);
+
+                    return;
+                }
+
+                // -----------------------------------------------------
+                // Update KDL using latest robot state
+                // -----------------------------------------------------
+                robot_->update(
+                    toStdVector(joint_positions_.data),
+                    toStdVector(joint_velocities_.data));
+
+                // Current optical-camera pose
+                KDL::Frame camera_frame =
+                    robot_->getEEFrame();
+
+                // Camera orientation in world frame
+                Eigen::Matrix3d Rc =
+                    toEigen(camera_frame.M);
+                
+
+                // Camera Jacobian, 6 x 7
+                Eigen::MatrixXd Jc =
+                    robot_->getEEJacobian().data;
+
+                // Marker distance ||cPo||
+                double marker_distance =
+                    marker_position_optical_.norm();
+
+
+                // -----------------------------------------------------
+                // Calculate vision controller output
+                // -----------------------------------------------------
+                joint_velocities_cmd_.data =
+                    controller_->vision_ctrl(
+                        s_,
+                        s_desired_,
+                        marker_distance,
+                        Rc,
+                        Jc,
+                        Kp_,
+                        lambda_);
+                
+
+
+                // Safety saturation for vision-control joint velocities
+                const double max_vision_velocity = 0.05;   // rad/s
+
+                for (long int i = 0;
+                    i < joint_velocities_cmd_.data.size();
+                    ++i)
+                {
+                    double qdot_i = joint_velocities_cmd_(i);
+
+                    qdot_i = std::clamp(
+                        qdot_i,
+                        -max_vision_velocity,
+                        max_vision_velocity);
+
+                    desired_commands_[i] = qdot_i;
+                }
+
+
+
+
+                // Publish the complete visual-servo velocity command
+                std_msgs::msg::Float64MultiArray cmd_msg;
+                cmd_msg.data = desired_commands_;
+                cmdPublisher_->publish(cmd_msg);
+
+                
+                
+                return;
+            }
+
+            // =========================================================
+            // Existing Q1 trajectory/action behaviour
+            // =========================================================
 
             // Do nothing until an action client starts the trajectory
             if (!trajectory_active_)
@@ -462,30 +796,6 @@ class Iiwa_pub_sub : public rclcpp::Node
                     toStdVector(joint_velocities_.data));
 
 
-                // =====================================================
-                // DEBUG: joint-limit distances
-                // =====================================================
-                // Eigen::VectorXd q_debug = robot_->getJntValues();
-                // Eigen::MatrixXd limits_debug = robot_->getJntLimits();
-
-                // std::cout << "CURRENT JOINT LIMIT DISTANCES" << std::endl;
-
-                // for (int i = 0; i < q_debug.size(); ++i)
-                // {
-                //     double q_lower = limits_debug(i, 0);
-                //     double q_upper = limits_debug(i, 1);
-
-                //     double dist_lower = q_debug(i) - q_lower;
-                //     double dist_upper = q_upper - q_debug(i);
-                //     double nearest_dist = std::min(dist_lower, dist_upper);
-
-                //     std::cout << "Joint " << i + 1
-                //             << " q=" << q_debug(i)
-                //             << " lower_dist=" << dist_lower
-                //             << " upper_dist=" << dist_upper
-                //             << " nearest_dist=" << nearest_dist
-                //             << std::endl;
-                // }
     
                 
                     
@@ -519,11 +829,7 @@ class Iiwa_pub_sub : public rclcpp::Node
                     joint_positions_cmd_ = joint_positions_;
                     robot_->getInverseKinematics(nextFrame, joint_positions_cmd_);
                 }
-                // else if(cmd_interface_ == "velocity"){
-                //     // Compute differential IK
-                //     Vector6d cartvel; cartvel << p_.vel + Kp_*error, o_error;
-                //     joint_velocities_cmd_.data = pseudoinverse(robot_->getEEJacobian().data)*cartvel;
-                // }
+                
 
 
                 else if(cmd_interface_ == "velocity")
@@ -554,8 +860,7 @@ class Iiwa_pub_sub : public rclcpp::Node
                     joint_efforts_cmd_.data[0] = 0.1*std::sin(2*M_PI*t_/total_time_);
                 }
 
-                // // Update KDLrobot structure
-                // robot_->update(toStdVector(joint_positions_.data),toStdVector(joint_velocities_.data));
+                
 
                 if(cmd_interface_ == "position"){
                     // Set joint position commands
@@ -640,17 +945,6 @@ class Iiwa_pub_sub : public rclcpp::Node
 
         void joint_state_subscriber(const sensor_msgs::msg::JointState& sensor_msg){
 
-            // for (size_t i = 0; i < sensor_msg.effort.size(); ++i) {
-            //     RCLCPP_INFO(this->get_logger(), "Positions %zu: %f", i, sensor_msg.position[i]);                
-            // }
-            // std::cout<<"\n";
-            // for (size_t i = 0; i < sensor_msg.effort.size(); ++i) {
-            //     RCLCPP_INFO(this->get_logger(), "Velocities %zu: %f", i, sensor_msg.velocity[i]);
-            // }
-            // std::cout<<"\n";
-            // for (size_t i = 0; i < sensor_msg.effort.size(); ++i) {
-            //     RCLCPP_INFO(this->get_logger(), "Efforts %zu: %f", i, sensor_msg.effort[i]);
-            // }
 
             joint_state_available_ = true;
             for (unsigned int i  = 0; i < sensor_msg.position.size(); i++){
@@ -659,11 +953,60 @@ class Iiwa_pub_sub : public rclcpp::Node
             }
         }
 
+        // ArUco marker pose callback
+
+
+        void aruco_pose_subscriber(const geometry_msgs::msg::PoseStamped & msg)
+        {
+            marker_pose_ = msg;
+            marker_pose_available_ = true;
+            // last_marker_time_ = this->now();
+            last_marker_time_ =
+                std::chrono::steady_clock::now();
+
+            // RCLCPP_INFO_THROTTLE(
+            //     this->get_logger(),
+            //     *this->get_clock(),
+            //     1000,
+            //     "Fresh ArUco pose received.");    
+
+            // ---------------------------------------------------------
+            // Marker position as reported by aruco_ros
+            // This is expressed in the eye-in-hand optical/image frame.
+            // ---------------------------------------------------------
+            marker_position_optical_ <<
+                msg.pose.position.x,
+                msg.pose.position.y,
+                msg.pose.position.z;
+ 
+
+
+            // Desired viewing direction: camera optical +Z axis
+            s_desired_ << 0.0, 0.0, 1.0;
+
+            // Compute the current unit viewing direction toward the marker
+            if (marker_position_optical_.norm() > 1e-6)
+            {
+                s_ = marker_position_optical_.normalized();
+            }
+            else
+            {
+                s_.setZero();
+                return;
+            }
+
+
+                
+        }
+
+
+
         rclcpp::Subscription<sensor_msgs::msg::JointState>::SharedPtr jointSubscriber_;
+        rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr arucoPoseSubscriber_;
         rclcpp::Publisher<FloatArray>::SharedPtr cmdPublisher_;
         rclcpp::TimerBase::SharedPtr timer_; 
         rclcpp::TimerBase::SharedPtr subTimer_;
-        rclcpp::Node::SharedPtr node_handle_;
+        // rclcpp::Node::SharedPtr node_handle_;
 
         // Action server
         rclcpp_action::Server<ExecuteTrajectory>::SharedPtr action_server_;
@@ -689,6 +1032,14 @@ class Iiwa_pub_sub : public rclcpp::Node
 
         int iteration_;
         bool joint_state_available_;
+        bool marker_pose_available_;
+        geometry_msgs::msg::PoseStamped marker_pose_;
+        // rclcpp::Time last_marker_time_;
+        std::chrono::steady_clock::time_point last_marker_time_;
+        Eigen::Vector3d marker_position_optical_;
+        
+        Eigen::Vector3d s_;
+        Eigen::Vector3d s_desired_;
         double t_;
         std::string cmd_interface_;
         std::string traj_type_;
@@ -712,10 +1063,63 @@ class Iiwa_pub_sub : public rclcpp::Node
 };
 
  
-int main( int argc, char** argv )
+// int main( int argc, char** argv )
+// {
+//     rclcpp::init(argc, argv);
+//     rclcpp::spin(std::make_shared<Iiwa_pub_sub>());
+//     rclcpp::shutdown();
+//     return 0;
+// }
+
+
+int main(int argc, char** argv)
 {
-    rclcpp::init(argc, argv);
-    rclcpp::spin(std::make_shared<Iiwa_pub_sub>());
+    // Disable ROS2's default SIGINT handler.
+    // We handle Ctrl+C ourselves so that we can send
+    // zero velocity BEFORE shutting ROS2 down.
+    rclcpp::init(
+        argc,
+        argv,
+        rclcpp::InitOptions(),
+        rclcpp::SignalHandlerOptions::None);
+
+    // Install our custom handlers
+    std::signal(SIGINT, signal_handler);
+    std::signal(SIGTERM, signal_handler);
+
+    auto node =
+        std::make_shared<Iiwa_pub_sub>();
+
+
+    // Keep ROS running until Ctrl+C / SIGTERM is requested
+    while (rclcpp::ok() && !shutdown_requested)
+    {
+        rclcpp::spin_some(node);
+
+        std::this_thread::sleep_for(
+            std::chrono::milliseconds(10));
+    }
+
+
+    // =====================================================
+    // IMPORTANT:
+    // ROS is still alive here.
+    //
+    // Send ZERO velocity BEFORE rclcpp::shutdown().
+    // =====================================================
+    node->stop_robot();
+
+
+    // Allow the final DDS message a short time to leave
+    // the publisher before destroying the ROS context.
+    rclcpp::spin_some(node);
+
+    std::this_thread::sleep_for(
+        std::chrono::milliseconds(100));
+
+
+    // Now it is safe to shut ROS down
     rclcpp::shutdown();
-    return 1;
+
+    return 0;
 }

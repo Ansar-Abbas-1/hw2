@@ -589,3 +589,417 @@ The successful publication of the marker pose confirms that the ArUco marker is 
 
 This completes **Question 2(a)**.
 
+
+## ✅ Q2(b) - Vision-Based Look-at-Point Control
+
+### 📦 About
+
+For **Question 2(b)**, a new vision-based velocity controller called `vision_ctrl` was implemented in the `KDLController` class.
+
+The controller performs a **look-at-point task** using the pose of the ArUco marker detected by `aruco_ros`.
+
+The objective is to continuously orient the eye-in-hand camera towards the ArUco marker while the marker is manually moved in Gazebo.
+
+The controller uses:
+
+- the normalized direction from the camera to the ArUco marker,
+- the current camera rotation,
+- the camera Jacobian,
+- the visual interaction matrix,
+- and a null-space joint-limit avoidance term.
+
+The controller is selected using:
+
+```bash
+ctrl:=vision
+```
+
+and must be used with the velocity command interface.
+
+---
+
+### 🔨 Build
+
+From the ROS 2 workspace:
+
+```bash
+cd ~/ros2_ws
+```
+
+Build the required package:
+
+```bash
+colcon build --packages-select ros2_kdl_package
+```
+
+Source the setup files:
+
+```bash
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+```
+
+---
+
+### ▶️ Launch the Robot
+
+Open the first terminal:
+
+```bash
+cd ~/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+```
+
+Launch the iiwa robot in Gazebo using the velocity controller:
+
+```bash
+ros2 launch iiwa_bringup iiwa.launch.py \
+  use_sim:=true \
+  command_interface:="velocity" \
+  robot_controller:="velocity_controller"
+```
+
+Keep this terminal running.
+
+---
+
+### 📷 Launch the ArUco Detection Pipeline
+
+Open a second terminal:
+
+```bash
+cd ~/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+```
+
+Run:
+
+```bash
+ros2 launch iiwa_description aruco_detection.launch.py
+```
+
+This starts the eye-in-hand camera bridge and the `aruco_ros` detector.
+
+The detected marker pose is published on:
+
+```text
+/aruco_single/pose
+```
+
+The `ros2_kdl_node` subscribes to this topic and uses the marker position for the visual controller.
+
+---
+
+### 🎯 Run the Vision Controller
+
+Open a third terminal:
+
+```bash
+cd ~/ros2_ws
+source /opt/ros/humble/setup.bash
+source install/setup.bash
+```
+
+Launch the KDL node with the velocity interface and the vision controller:
+
+```bash
+ros2 launch ros2_kdl_package kdl_launch.launch.py \
+cmd_interface:=velocity \
+ctrl:=vision
+```
+The selected controller can be verified with:
+
+```bash
+ros2 param get /ros2_kdl_node ctrl
+```
+
+The expected output is:
+
+```text
+String value is: vision
+```
+
+The velocity command interface can be checked using:
+
+```bash
+ros2 param get /ros2_kdl_node cmd_interface
+```
+
+The expected output is:
+
+```text
+String value is: velocity
+```
+
+---
+
+### ⚙️ Controller Parameters
+
+The controller parameters are loaded from:
+
+```text
+ros2_kdl_package/config/kdl_params.yaml
+```
+
+The parameters used for the final experiment were:
+
+```yaml
+cmd_interface: velocity
+
+Kp: 0.2
+lambda: 500.9
+```
+
+`Kp` controls the magnitude of the primary visual-control command.
+
+`lambda` scales the secondary joint-limit avoidance motion.
+
+A larger value of `lambda` was used so that the null-space contribution remains small compared with the primary visual task.
+
+For safety, the commanded joint velocities are also saturated to:
+
+```text
+±0.05 rad/s
+```
+
+before being published to the velocity controller.
+
+---
+
+### 👁️ Visual Task
+
+The ArUco marker position is received from:
+
+```text
+/aruco_single/pose
+```
+
+and expressed in the camera optical frame.
+
+The marker position vector is normalized to obtain the current viewing direction `s`.
+
+The desired viewing direction is:
+
+```text
+sd = [0, 0, 1]
+```
+
+which corresponds to the positive optical z-axis of the camera.
+
+The visual interaction matrix is constructed using:
+
+- the current viewing direction,
+- the distance between the camera and the marker,
+- and the current camera rotation.
+
+The interaction matrix is then combined with the camera Jacobian to obtain the visual Jacobian used by the controller.
+
+The final commanded joint velocity contains two contributions:
+
+```text
+primary vision task
++
+null-space joint-limit avoidance task
+```
+
+The primary task generates the robot motion required to orient the camera towards the ArUco marker.
+
+The null-space projector allows the robot to perform secondary joint-limit avoidance motion without interfering with the primary visual tracking task.
+
+---
+
+### 🦾 Camera Jacobian and Eye-in-Hand Configuration
+
+For the vision controller, the KDL end-effector is configured to correspond to the eye-in-hand camera frame rather than the original robot tool frame.
+
+The camera Jacobian therefore describes the linear and angular motion of the camera with respect to the robot joints.
+
+The controller uses a `6 x 7` camera Jacobian:
+
+```text
+Jc: 6 x 7
+```
+
+The six rows correspond to the three linear and three angular velocity components of the camera, while the seven columns correspond to the seven joints of the KUKA iiwa.
+
+This camera Jacobian is different from the original end-effector Jacobian and is used specifically for the vision-based task.
+
+---
+
+### 🛡️ Safety Behaviour
+
+Two safety mechanisms are included in the vision-control implementation.
+
+#### ArUco Pose Timeout
+
+If no fresh ArUco marker pose is received for more than approximately `0.5 s`, the controller immediately publishes zero joint velocities.
+
+A warning similar to the following is produced:
+
+```text
+ArUco marker lost/stale (...) Sending zero velocity.
+```
+
+The commanded velocity becomes:
+
+```text
+[0, 0, 0, 0, 0, 0, 0]
+```
+
+This prevents the robot from continuing to execute an old velocity command when the marker is no longer detected or when the ArUco pose stream stops.
+
+#### Safe Shutdown
+
+A separate shutdown protection is also implemented.
+
+When the KDL node is stopped using `Ctrl+C`, the command timer is cancelled and zero joint velocities are sent before the node terminates.
+
+Typical output is:
+
+```text
+Command timer cancelled.
+Stopping robot: sending ZERO joint velocities.
+```
+
+This prevents the velocity controller from continuing to execute the last non-zero command after the KDL node is stopped.
+
+---
+
+### 📊 Record the Experiment with ROS 2 Bag
+
+The final visual-tracking experiment was recorded using ROS 2 bag.
+
+Create a directory for the recordings:
+
+```bash
+cd ~/ros2_ws
+mkdir -p bags
+cd bags
+```
+
+Record the commanded joint velocities, measured joint states, and ArUco pose:
+
+```bash
+ros2 bag record \
+/velocity_controller/commands \
+/joint_states \
+/aruco_single/pose \
+-o vision_tracking
+```
+
+During recording, manually move the ArUco marker to several different positions using the Gazebo interface.
+
+The robot should continuously reorient the eye-in-hand camera and follow the marker.
+
+Stop the recording using:
+
+```text
+Ctrl+C
+```
+
+The recorded bag can be checked using:
+
+```bash
+ros2 bag info ~/ros2_ws/bags/vision_tracking
+```
+
+The final experiment contained the following topics:
+
+```text
+/velocity_controller/commands
+/aruco_single/pose
+/joint_states
+```
+
+The recorded experiment had a duration of approximately:
+
+```text
+145 s
+```
+
+The bag contained approximately:
+
+```text
+1447   velocity command messages
+4359   ArUco pose messages
+13197  joint state messages
+```
+
+---
+
+### 📈 Velocity Command Plot
+
+The topic used for the required homework plot is:
+
+```text
+/velocity_controller/commands
+```
+
+This topic contains the commanded velocities of all seven robot joints.
+
+The recorded commands were extracted from the ROS 2 bag and plotted against time.
+
+The plot contains the seven commanded joint velocities:
+
+```text
+qdot1
+qdot2
+qdot3
+qdot4
+qdot5
+qdot6
+qdot7
+```
+
+with:
+
+```text
+x-axis: Time [s]
+y-axis: Commanded joint velocity [rad/s]
+```
+
+The resulting plot shows that manually changing the position of the ArUco marker produces corresponding changes in the commanded robot joint velocities.
+
+After each marker displacement, the visual controller generates a new combination of joint velocities to reorient the eye-in-hand camera towards the marker.
+
+As the robot approaches the required viewing direction, the commanded joint velocities generally reduce in magnitude.
+
+The different signs and magnitudes of the seven joint velocities are expected because the visual Jacobian and its pseudoinverse distribute the required camera motion across the redundant seven-joint manipulator.
+
+The commanded velocities remained well below the imposed safety saturation:
+
+```text
+±0.05 rad/s
+```
+
+throughout the experiment.
+
+---
+
+### ✅ Result
+
+The `vision_ctrl` controller successfully performs the required look-at-point visual tracking task.
+
+The robot continuously follows the manually moved ArUco marker by changing the pose and orientation of the eye-in-hand camera.
+
+The controller successfully combines:
+
+- the ArUco marker position,
+- the normalized viewing direction,
+- the visual interaction matrix,
+- the camera Jacobian,
+- the pseudoinverse solution,
+- and the null-space joint-limit avoidance contribution.
+
+The null-space motion remains secondary to the main vision task and allows redundant robot motion to be used for joint-limit avoidance.
+
+The commanded joint velocities were recorded using ROS 2 bag and plotted over the complete experiment.
+
+The resulting velocity plot demonstrates the response of the controller to repeated manual repositioning of the ArUco marker in Gazebo.
+
+Marker-loss protection and safe shutdown behaviour were also verified by confirming that zero joint velocities are published whenever fresh ArUco data is unavailable or the KDL node is terminated.
+
+This completes **Question 2(b)**.
+
