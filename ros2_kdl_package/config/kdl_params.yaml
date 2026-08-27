@@ -8,8 +8,8 @@ ros2_kdl_node:
     total_time: 1.5
     trajectory_len: 150
 
-    Kp: 5.0
-    lambda: 9.9
+    Kp: 0.2
+    lambda: 500.9
 
     end_position_x: 0.5
     end_position_y: 0.0
