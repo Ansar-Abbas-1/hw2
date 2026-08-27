@@ -16,6 +16,22 @@ def generate_launch_description():
         ],
     )
 
+
+    # Bridge the Gazebo set_pose service to ROS 2
+    # This allows the ArUco marker pose to be updated from ROS 2.
+    set_pose_bridge = Node(
+        package='ros_gz_bridge',
+        executable='parameter_bridge',
+        name='set_pose_bridge',
+        output='screen',
+        arguments=[
+            '/world/default/set_pose@ros_gz_interfaces/srv/SetEntityPose',
+        ],
+    )
+
+
+
+
     # Detect ArUco marker ID 201 using the eye-in-hand camera
     aruco_detector = Node(
         package='aruco_ros',
@@ -39,5 +55,6 @@ def generate_launch_description():
 
     return LaunchDescription([
         camera_bridge,
+        set_pose_bridge,
         aruco_detector,
     ])

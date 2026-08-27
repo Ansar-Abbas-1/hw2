@@ -1,3 +1,229 @@
+# 📘 Homework 2
+
+This repository contains the implementation and experimental results for the different parts of the homework using **ROS 2 Humble**, the **KUKA iiwa**, **KDL**, and **Gazebo/Ignition**.
+
+The homework was developed incrementally. To keep the implementation of each question separate and reproducible, the different question parts are stored in dedicated Git branches.
+
+---
+
+## 🚀 How to Use This Repository
+
+The workspace uses the following two main ROS 2 packages:
+
+```text
+ros2_iiwa
+ros2_kdl_package
+```
+
+Clone both packages into the `src` directory of a ROS 2 workspace.
+
+A typical workspace structure is:
+
+```text
+ros2_ws/
+├── src/
+│   ├── ros2_iiwa/
+│   └── ros2_kdl_package/
+├── build/
+├── install/
+└── log/
+```
+
+After cloning the packages, build the workspace:
+
+```bash
+cd ~/ros2_ws
+
+source /opt/ros/humble/setup.bash
+
+colcon build
+
+source install/setup.bash
+```
+
+---
+
+## 🌿 Homework Organization Using Git Branches
+
+Each question or question part is stored in a separate Git branch.
+
+This makes it possible to inspect and test the implementation corresponding to a specific part of the homework without mixing it with changes introduced in later parts.
+
+The branch organization is:
+
+```text
+main        → Question 1(a)
+q1_part_b   → Question 1(b)
+q1_part_c   → Question 1(c)
+q2-part-a   → Question 2(a)
+q2-part-b   → Question 2(b)
+q2-part-c   → Question 2(c)
+```
+
+**Question 1(a)** is implemented on the `main` branch.
+
+For all subsequent parts, the branch name corresponds directly to the question and part being tested.
+
+---
+
+## 🔄 Switching to a Specific Homework Part
+
+Before testing a particular question, switch to its corresponding branch.
+
+For example, to test **Question 2(b)**:
+
+```bash
+cd ~/ros2_ws/src
+cd <repository-directory>
+
+git checkout q2-part-b
+```
+
+To test **Question 2(c)**:
+
+```bash
+git checkout q2-part-c
+```
+
+To return to **Question 1(a)**:
+
+```bash
+git checkout main
+```
+
+You can check the currently selected branch using:
+
+```bash
+git branch
+```
+
+The active branch is indicated by `*`.
+
+For example:
+
+```text
+  main
+  q1_part_b
+  q1_part_c
+  q2-part-a
+* q2-part-b
+  q2-part-c
+```
+
+In this example, the implementation for **Question 2(b)** is currently selected.
+
+---
+
+## 🔨 Rebuild After Switching Branches
+
+After switching to another homework branch, rebuild the workspace so that the executable files correspond to the selected implementation.
+
+From the workspace root:
+
+```bash
+cd ~/ros2_ws
+
+source /opt/ros/humble/setup.bash
+
+colcon build
+
+source install/setup.bash
+```
+
+If only the packages used in this homework need to be rebuilt, they can also be built selectively:
+
+```bash
+colcon build --packages-select iiwa_description ros2_kdl_package
+```
+
+Then source the workspace again:
+
+```bash
+source install/setup.bash
+```
+
+---
+
+## 🧪 Testing a Specific Question
+
+Each homework part contains its own instructions in the corresponding branch's `README.md`.
+
+The recommended procedure is:
+
+1. Switch to the branch corresponding to the question.
+2. Build the ROS 2 workspace.
+3. Source the ROS 2 and workspace setup files.
+4. Read the question-specific section of the `README.md`.
+5. Open the required terminals described in that section.
+6. Run the provided launch commands.
+7. Perform the specified test or experiment.
+8. Compare the observed behaviour with the expected result documented in the README.
+
+For example, to verify **Question 2(c)**:
+
+```bash
+git checkout q2-part-c
+
+cd ~/ros2_ws
+source /opt/ros/humble/setup.bash
+
+colcon build
+
+source install/setup.bash
+```
+
+Then follow the **Q2(c)** section of the README to launch Gazebo, start the ArUco detection pipeline and service bridge, and test the marker pose update using the provided ROS 2 service call.
+
+---
+
+## 📖 Question-Specific Instructions
+
+The README in each branch documents the commands required to reproduce that part of the homework.
+
+These instructions include, where applicable:
+
+- required ROS 2 launch commands,
+- controller selection,
+- command interface selection,
+- ROS 2 parameters,
+- required topics,
+- ROS 2 services,
+- Gazebo/Ignition interfaces,
+- verification commands,
+- expected behaviour,
+- safety behaviour,
+- ROS 2 bag recording,
+- plots and experimental results.
+
+Therefore, after switching to the required branch, follow the corresponding question section in the README to reproduce and verify the implementation.
+
+---
+
+## ✅ Reproducing the Homework
+
+In summary, the workflow for reproducing any homework part is:
+
+```text
+Clone packages
+      ↓
+Create/build ROS 2 workspace
+      ↓
+Switch to the required Git branch
+      ↓
+Rebuild and source the workspace
+      ↓
+Read the corresponding README section
+      ↓
+Run the documented launch commands
+      ↓
+Perform the specified test
+      ↓
+Verify the expected result
+```
+
+This branch-based organization keeps each homework stage reproducible and allows the implementation of every question to be inspected and tested independently.
+
+
 # Q1(a) - ros2_kdl_package
 
 ## :package: About
@@ -1002,4 +1228,385 @@ The resulting velocity plot demonstrates the response of the controller to repea
 Marker-loss protection and safe shutdown behaviour were also verified by confirming that zero joint velocities are published whenever fresh ArUco data is unavailable or the KDL node is terminated.
 
 This completes **Question 2(b)**.
+
+
+## ✅ Q2(c) - ROS 2 Service for Updating the ArUco Marker Pose
+
+### 📦 About
+
+For **Question 2(c)**, the existing Gazebo pose service was bridged to ROS 2 so that the position of the ArUco marker can be changed directly using a ROS 2 service call.
+
+The Gazebo service used is:
+
+```text
+/world/default/set_pose
+```
+
+The corresponding ROS 2 service interface is:
+
+```text
+ros_gz_interfaces/srv/SetEntityPose
+```
+
+A `parameter_bridge` was added to the previously created:
+
+```text
+iiwa_description/launch/aruco_detection.launch.py
+```
+
+This allows the Gazebo `set_pose` service to be accessed directly from ROS 2.
+
+The ArUco marker is represented in Gazebo by the model:
+
+```text
+arucotag
+```
+
+---
+
+### 🔗 Service Bridge
+
+The following service bridge is created inside `aruco_detection.launch.py`:
+
+```python
+set_pose_bridge = Node(
+    package='ros_gz_bridge',
+    executable='parameter_bridge',
+    name='set_pose_bridge',
+    output='screen',
+    arguments=[
+        '/world/default/set_pose@ros_gz_interfaces/srv/SetEntityPose',
+    ],
+)
+```
+
+The bridge node is included in the launch description together with the camera bridge and ArUco detector:
+
+```python
+return LaunchDescription([
+    camera_bridge,
+    set_pose_bridge,
+    aruco_detector,
+])
+```
+
+Therefore, the `set_pose` bridge is started automatically when the ArUco detection launch file is executed.
+
+A separate manual `parameter_bridge` command is not required.
+
+---
+
+### 🔨 Build
+
+From the ROS 2 workspace:
+
+```bash
+cd ~/ros2_ws
+```
+
+Build the modified package:
+
+```bash
+colcon build --packages-select iiwa_description
+```
+
+Source ROS 2 and the workspace:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+```
+
+---
+
+### ▶️ Terminal 1 - Launch the IIWA Robot in Gazebo
+
+Open the first terminal and source the workspace:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+```
+
+Launch the IIWA simulation:
+
+```bash
+ros2 launch iiwa_bringup iiwa.launch.py \
+  use_sim:=true \
+  command_interface:="velocity" \
+  robot_controller:="velocity_controller"
+```
+
+Keep this terminal running.
+
+The Gazebo world contains the IIWA robot and the `arucotag` model used as the visual target.
+
+---
+
+### 📷 Terminal 2 - Launch ArUco Detection and the Set-Pose Bridge
+
+Open a second terminal:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+```
+
+Launch:
+
+```bash
+ros2 launch iiwa_description aruco_detection.launch.py
+```
+
+This launch file starts:
+
+- the eye-in-hand camera bridge,
+- the `set_pose_bridge`,
+- and the `aruco_ros` detector.
+
+The `set_pose_bridge` automatically exposes the Gazebo service:
+
+```text
+/world/default/set_pose
+```
+
+to ROS 2.
+
+Keep this terminal running.
+
+---
+
+### 🔍 Terminal 3 - Verify the Bridged Service
+
+Open a third terminal:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+```
+
+Check that the service is available:
+
+```bash
+ros2 service list | grep set_pose
+```
+
+The important expected service is:
+
+```text
+/world/default/set_pose
+```
+
+ROS 2 may also show the normal parameter services associated with the `set_pose_bridge` node, such as:
+
+```text
+/set_pose_bridge/describe_parameters
+/set_pose_bridge/get_parameter_types
+/set_pose_bridge/get_parameters
+/set_pose_bridge/list_parameters
+/set_pose_bridge/set_parameters
+/set_pose_bridge/set_parameters_atomically
+```
+
+These are normal ROS 2 parameter services.
+
+Verify the type of the bridged Gazebo service:
+
+```bash
+ros2 service type /world/default/set_pose
+```
+
+The expected result is:
+
+```text
+ros_gz_interfaces/srv/SetEntityPose
+```
+
+---
+
+### 🎯 Terminal 3 - Move the ArUco Marker Using a ROS 2 Service Call
+
+The ArUco marker can now be repositioned directly from ROS 2.
+
+For example:
+
+```bash
+ros2 service call /world/default/set_pose \
+ros_gz_interfaces/srv/SetEntityPose \
+"{entity: {name: 'arucotag', type: 2}, pose: {position: {x: 0.5, y: 0.2, z: 0.5}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}"
+```
+
+Here:
+
+```text
+name: 'arucotag'
+```
+
+selects the ArUco marker model.
+
+The value:
+
+```text
+type: 2
+```
+
+specifies that the selected Gazebo entity is a model.
+
+The requested position in this example is:
+
+```text
+x = 0.5 m
+y = 0.2 m
+z = 0.5 m
+```
+
+The orientation is specified using the quaternion:
+
+```text
+x = 0.0
+y = 0.0
+z = 0.0
+w = 1.0
+```
+
+A successful request should return:
+
+```text
+response:
+ros_gz_interfaces.srv.SetEntityPose_Response(success=True)
+```
+
+The `arucotag` model should also visibly move to the requested position in Gazebo.
+
+---
+
+### 🔄 Test with Another Marker Position
+
+The service can be called again with another pose.
+
+For example:
+
+```bash
+ros2 service call /world/default/set_pose \
+ros_gz_interfaces/srv/SetEntityPose \
+"{entity: {name: 'arucotag', type: 2}, pose: {position: {x: 0.6, y: -0.2, z: 0.6}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}"
+```
+
+Again, a successful call should return:
+
+```text
+success=True
+```
+
+and the marker should move to the newly requested position in Gazebo.
+
+---
+
+### 👁️ Optional Combined Test with Q2(b) Vision Controller
+
+The service implemented in Q2(c) can also be tested together with the vision controller developed in **Q2(b)**.
+
+Keep **Terminal 1** and **Terminal 2** running.
+
+Open another terminal:
+
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/install/setup.bash
+```
+
+Launch the vision controller:
+
+```bash
+ros2 launch ros2_kdl_package kdl_launch.launch.py \
+  cmd_interface:=velocity \
+  ctrl:=vision
+```
+
+The complete system can then be tested by calling the `set_pose` service from another terminal.
+
+A moderate marker displacement can be requested, for example:
+
+```bash
+ros2 service call /world/default/set_pose \
+ros_gz_interfaces/srv/SetEntityPose \
+"{entity: {name: 'arucotag', type: 2}, pose: {position: {x: 0.5, y: 0.15, z: 0.5}, orientation: {x: 0.0, y: 0.0, z: 0.0, w: 1.0}}}"
+```
+
+When the marker remains inside the camera field of view:
+
+1. Gazebo moves the `arucotag` model to the requested pose.
+2. The eye-in-hand camera observes the marker at its new location.
+3. `aruco_ros` updates `/aruco_single/pose`.
+4. The `vision_ctrl` controller receives the new marker direction.
+5. New joint velocity commands are calculated.
+6. The robot reorients the eye-in-hand camera towards the marker.
+
+Small or moderate marker displacements are preferable for this combined test so that the marker remains visible to the camera.
+
+---
+
+### 🛡️ Behaviour if the Marker Leaves the Camera View
+
+If the requested marker position places the ArUco marker outside the camera field of view, the ArUco detector will no longer provide fresh marker measurements.
+
+The safety mechanism implemented for the vision controller then detects the stale marker measurement and commands zero joint velocities.
+
+Therefore, losing the marker during a large pose change does not indicate a failure of the `set_pose` service. The service may have moved the marker successfully, while the vision controller correctly stops because the visual target is no longer visible.
+
+---
+
+### 🔧 Important Components Used
+
+The Q2(c) implementation uses the following ROS 2 and Gazebo components:
+
+- `ros_gz_bridge`
+- `parameter_bridge`
+- `ros_gz_interfaces/srv/SetEntityPose`
+- `/world/default/set_pose`
+- `aruco_detection.launch.py`
+- `arucotag` Gazebo model
+- `aruco_ros`
+
+The bridge connects the existing Gazebo pose-setting functionality to ROS 2, allowing the marker pose to be controlled through the standard ROS 2 service interface.
+
+---
+
+### ✅ Result
+
+The Gazebo `/world/default/set_pose` service was successfully exposed to ROS 2 using a `ros_gz_bridge` `parameter_bridge`.
+
+The bridge was added directly to:
+
+```text
+iiwa_description/launch/aruco_detection.launch.py
+```
+
+and therefore starts automatically with the ArUco detection pipeline.
+
+The bridged service was verified using:
+
+```bash
+ros2 service list | grep set_pose
+```
+
+and its ROS 2 type was confirmed as:
+
+```text
+ros_gz_interfaces/srv/SetEntityPose
+```
+
+The service was then tested using `ros2 service call`.
+
+The calls returned:
+
+```text
+success=True
+```
+
+and the `arucotag` model visibly moved to the requested positions in Gazebo.
+
+The service can also be used together with the Q2(b) vision controller, allowing the ArUco target to be repositioned from ROS 2 while the eye-in-hand vision controller reacts to the updated target location.
+
+This completes **Question 2(c)**.
 
